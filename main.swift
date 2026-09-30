@@ -1,11 +1,11 @@
-// Reader — a read-only Markdown viewer that follows the system light/dark setting live.
+// Reader — a Markdown reader and editor that follows the system light/dark setting live.
 //
 // Each document opens in a window holding a WKWebView. The page (web/reader.html) renders
 // with marked, KaTeX and highlight.js, all bundled so nothing is fetched. Its colours come from
 // prefers-color-scheme, which WebKit re-evaluates the moment the app's appearance changes —
 // the thing Typora does not do. The file is watched and re-rendered in place on every save,
-// so the scroll position survives edits made in another app. Editing happens elsewhere:
-// "Open in Editor" (⌘E) hands the file to Typora, or whichever app is chosen.
+// so the scroll position survives edits made in another app. ⌘E opens the Markdown source
+// beside the page for editing; the page follows as you type and the file saves itself.
 
 import AppKit
 import UniformTypeIdentifiers
@@ -164,18 +164,23 @@ enum Links {
 // MARK: - Document
 
 /// NSDocument supplies the Open panel, Open Recent, one window per file, the title bar's
-/// proxy icon and window restoration. It never holds or saves content: the window reads the
-/// file straight from disk each time it changes.
+/// proxy icon, window restoration, and saving: edits autosave in place, with the usual
+/// Versions history behind File › Revert to Saved.
 @objc(MarkdownDocument)
 final class MarkdownDocument: NSDocument {
-    override class var autosavesInPlace: Bool { false }
-    override var isDocumentEdited: Bool { false }
+    var text = ""
+    /// Called whenever `text` is replaced from disk: on opening, and on reverting after
+    /// another app changed the file.
+    var onLoad: (() -> Void)?
 
-    override func read(from url: URL, ofType typeName: String) throws {
-        guard FileManager.default.isReadableFile(atPath: url.path) else {
-            throw CocoaError(.fileReadNoPermission, userInfo: [NSURLErrorKey: url])
-        }
+    override class var autosavesInPlace: Bool { true }
+
+    override func read(from data: Data, ofType typeName: String) throws {
+        text = String(decoding: data, as: UTF8.self)
+        if Thread.isMainThread { onLoad?() } else { DispatchQueue.main.async { self.onLoad?() } }
     }
+
+    override func data(ofType typeName: String) throws -> Data { Data(text.utf8) }
 
     override func makeWindowControllers() {
         addWindowController(ReaderWindowController())
@@ -187,6 +192,42 @@ final class MarkdownDocument: NSDocument {
         }
         return controller.printOperation(printInfo: printInfo)
     }
+
+    func saveNow() {
+        guard isDocumentEdited else { return }
+        autosave(withImplicitCancellability: false) { error in
+            if let error { NSLog("Reader: save failed: \(error)") }
+        }
+    }
+}
+
+// MARK: - Page pool
+
+/// Starting WebKit's helper processes takes about a second, far longer than rendering does.
+/// So a page is loaded ahead of time — at launch, and again after each window takes one —
+/// and a new window starts with a page that is already loaded.
+enum PagePool {
+    private static var spare: ReaderWebView?
+
+    static func prepare() {
+        if spare == nil { spare = make() }
+    }
+
+    static func take() -> ReaderWebView {
+        let view = spare ?? make()
+        spare = nil
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { prepare() }
+        return view
+    }
+
+    private static func make() -> ReaderWebView {
+        let view = ReaderWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 800),
+                                 configuration: WKWebViewConfiguration())
+        view.setValue(false, forKey: "drawsBackground")  // no white flash in dark mode
+        let page = Bundle.main.url(forResource: "reader", withExtension: "html", subdirectory: "web")!
+        view.loadFileURL(page, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+        return view
+    }
 }
 
 // MARK: - Window
@@ -197,15 +238,27 @@ final class ReaderWebView: WKWebView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
-final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate,
-                                    WKNavigationDelegate, WKUIDelegate {
+/// Reading shows the rendered page alone. Editing (⌘E) opens the Markdown source to its
+/// left; the page re-renders as you type and follows the source's scroll position.
+final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSMenuItemValidation,
+                                    WKNavigationDelegate, WKUIDelegate, NSTextViewDelegate {
     private let webView: ReaderWebView
+    private let splitView = NSSplitView()
+    private let sourceScroll = NSTextView.scrollableTextView()
+    private var sourceView: NSTextView { sourceScroll.documentView as! NSTextView }
     private let searchItem = NSSearchToolbarItem(itemIdentifier: .search)
+    private var editItem: NSToolbarItem?
     private var watcher: FileWatcher?
     private var pageLoaded = false
+    private var pendingRender: DispatchWorkItem?
+    private var pendingSave: DispatchWorkItem?
+    private var widthBeforeEditing: CGFloat?
+    private(set) var isEditing = false
+    private var waitingToShow = false
+    private var hasRendered = false
 
     init() {
-        webView = ReaderWebView(frame: .zero, configuration: WKWebViewConfiguration())
+        webView = PagePool.take()
         let window = NSWindow(contentRect: NSRect(origin: .zero, size: Prefs.windowSize),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable],
                               backing: .buffered, defer: false)
@@ -215,12 +268,37 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
         window.tabbingMode = .preferred
         super.init(window: window)
 
-        webView.setValue(false, forKey: "drawsBackground")  // no white flash in dark mode
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        pageLoaded = !webView.isLoading && webView.url != nil
         webView.allowsMagnification = true
         webView.pageZoom = Prefs.zoom
-        window.contentView = webView
+
+        let source = sourceView
+        source.delegate = self
+        source.isRichText = false
+        source.importsGraphics = false
+        source.allowsUndo = true
+        source.font = .monospacedSystemFont(ofSize: 13, weight: .regular)
+        source.textColor = .textColor
+        source.backgroundColor = .textBackgroundColor
+        source.textContainerInset = NSSize(width: 14, height: 20)
+        source.isAutomaticQuoteSubstitutionEnabled = false
+        source.isAutomaticDashSubstitutionEnabled = false
+        source.isAutomaticTextReplacementEnabled = false
+        source.isAutomaticSpellingCorrectionEnabled = false
+        source.isContinuousSpellCheckingEnabled = true
+        source.usesFindBar = true
+        source.isIncrementalSearchingEnabled = true
+        sourceScroll.contentView.postsBoundsChangedNotifications = true
+        NotificationCenter.default.addObserver(self, selector: #selector(sourceScrolled(_:)),
+                                               name: NSView.boundsDidChangeNotification, object: sourceScroll.contentView)
+
+        splitView.isVertical = true
+        splitView.dividerStyle = .thin
+        splitView.addArrangedSubview(webView)
+        window.contentView = splitView
+        splitView.adjustSubviews()
         window.delegate = self
 
         let toolbar = NSToolbar(identifier: "Reader")
@@ -232,31 +310,73 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
         searchItem.searchField.sendsWholeSearchString = true
         searchItem.searchField.target = self
         searchItem.searchField.action = #selector(findNext(_:))
-
-        let page = Bundle.main.url(forResource: "reader", withExtension: "html", subdirectory: "web")!
-        webView.loadFileURL(page, allowingReadAccessTo: URL(fileURLWithPath: "/"))
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
     override var document: AnyObject? {
         didSet {
-            guard document != nil else { return }
-            watcher = FileWatcher(url: { [weak self] in (self?.document as? NSDocument)?.fileURL },
-                                  onChange: { [weak self] in self?.render() })
-            render()
+            guard let doc = markdown else { return }
+            doc.onLoad = { [weak self] in self?.documentLoaded() }
+            watcher = FileWatcher(url: { [weak doc] in doc?.fileURL },
+                                  onChange: { [weak self] in self?.fileChangedOnDisk() })
+            documentLoaded()
+            if doc.fileURL == nil {  // File › New starts in the editor
+                DispatchQueue.main.async { self.setEditing(true) }
+            }
         }
     }
 
-    private var fileURL: URL? { (document as? NSDocument)?.fileURL }
+    private var markdown: MarkdownDocument? { document as? MarkdownDocument }
+
+    /// Holds the window back until the page has its content (or a second has passed),
+    /// so it opens showing the document rather than an empty frame.
+    override func showWindow(_ sender: Any?) {
+        guard !hasRendered else { return super.showWindow(sender) }
+        waitingToShow = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.showIfWaiting() }
+    }
+
+    private func showIfWaiting() {
+        guard waitingToShow else { return }
+        waitingToShow = false
+        super.showWindow(nil)
+    }
+
+    /// The document's text was replaced from disk: show it in the source view and the page.
+    private func documentLoaded() {
+        guard let doc = markdown else { return }
+        if sourceView.string != doc.text {
+            let caret = sourceView.selectedRange().location
+            sourceView.string = doc.text
+            doc.undoManager?.removeAllActions()  // undo steps would point into the old text
+            sourceView.setSelectedRange(NSRange(location: min(caret, (doc.text as NSString).length), length: 0))
+        }
+        render()
+    }
+
+    /// Another app (or this one's own save) changed the file. Reload it unless there are
+    /// unsaved edits here; in that case NSDocument asks which version to keep when it next saves.
+    private func fileChangedOnDisk() {
+        guard let doc = markdown, let url = doc.fileURL, let data = try? Data(contentsOf: url) else { return }
+        guard String(decoding: data, as: UTF8.self) != doc.text, !doc.isDocumentEdited else { return }
+        do {
+            try doc.revert(toContentsOf: url, ofType: doc.fileType ?? "net.daringfireball.markdown")
+        } catch {
+            NSLog("Reader: reload failed: \(error)")
+        }
+    }
 
     private func render() {
-        guard pageLoaded, let url = fileURL, let data = try? Data(contentsOf: url) else { return }
+        guard pageLoaded, let doc = markdown else { return }
+        let folder = doc.fileURL?.deletingLastPathComponent() ?? FileManager.default.homeDirectoryForCurrentUser
         webView.callAsyncJavaScript("render(markdown, base)",
-                                    arguments: ["markdown": String(decoding: data, as: UTF8.self),
-                                                "base": url.deletingLastPathComponent().absoluteString],
-                                    in: nil, in: .page) { result in
+                                    arguments: ["markdown": doc.text, "base": folder.absoluteString],
+                                    in: nil, in: .page) { [weak self] result in
             if case .failure(let error) = result { NSLog("Reader: render failed: \(error)") }
+            self?.hasRendered = true
+            self?.showIfWaiting()
+            if self?.isEditing == true { self?.syncScroll() }
         }
     }
 
@@ -272,26 +392,142 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
         return operation
     }
 
+    // MARK: Editing
+
+    @objc func toggleEditing(_ sender: Any?) { setEditing(!isEditing) }
+
+    private func setEditing(_ editing: Bool) {
+        guard editing != isEditing, let window else { return }
+        isEditing = editing
+        let fullScreen = window.styleMask.contains(.fullScreen)
+        if editing {
+            splitView.insertArrangedSubview(sourceScroll, at: 0)
+            // Widen the window so the page keeps a readable width beside the source.
+            var frame = window.frame
+            let screen = window.screen?.visibleFrame ?? frame
+            let wanted = min(max(frame.width, 1320), screen.width)
+            if !fullScreen && wanted > frame.width {
+                widthBeforeEditing = frame.width
+                frame.origin.x = max(screen.minX, min(frame.midX - wanted / 2, screen.maxX - wanted))
+                frame.size.width = wanted
+                window.setFrame(frame, display: true, animate: true)
+            }
+            splitView.layoutSubtreeIfNeeded()
+            splitView.setPosition(splitView.bounds.width / 2, ofDividerAt: 0)
+            window.makeFirstResponder(sourceView)
+            syncScroll()
+        } else {
+            markdown?.saveNow()
+            sourceScroll.removeFromSuperview()
+            splitView.adjustSubviews()
+            if let width = widthBeforeEditing, !fullScreen {
+                var frame = window.frame
+                frame.origin.x = frame.midX - width / 2
+                frame.size.width = width
+                window.setFrame(frame, display: true, animate: true)
+            }
+            widthBeforeEditing = nil
+            window.makeFirstResponder(webView)
+        }
+        updateEditItem()
+    }
+
+    private func updateEditItem() {
+        editItem?.label = isEditing ? "Done" : "Edit"
+        editItem?.toolTip = isEditing ? "Stop editing (⌘E)" : "Edit the Markdown (⌘E)"
+        editItem?.image = NSImage(systemSymbolName: isEditing ? "checkmark.circle" : "square.and.pencil",
+                                  accessibilityDescription: editItem?.label)
+    }
+
+    func textDidChange(_ notification: Notification) {
+        guard let doc = markdown else { return }
+        doc.text = sourceView.string
+
+        pendingRender?.cancel()
+        let render = DispatchWorkItem { [weak self] in self?.render() }
+        pendingRender = render
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12, execute: render)
+
+        // Save a moment after typing stops, so other apps (and Claude) see the file current.
+        pendingSave?.cancel()
+        let save = DispatchWorkItem { [weak doc] in doc?.saveNow() }
+        pendingSave = save
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: save)
+    }
+
+    private static let listItem = try! NSRegularExpression(pattern: #"^(\s*)(?:([-*+])|(\d+)([.)]))(\s+)(\[[ xX]\]\s+)?"#)
+
+    /// Return inside a list item starts the next item (numbered lists count on, task boxes
+    /// start unticked); Return on an empty item ends the list.
+    func textView(_ textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        let caret = textView.selectedRange()
+        guard caret.length == 0 else { return false }
+        let text = textView.string as NSString
+        let lineStart = text.lineRange(for: NSRange(location: caret.location, length: 0)).location
+        let line = text.substring(with: NSRange(location: lineStart, length: caret.location - lineStart)) as NSString
+        guard let match = Self.listItem.firstMatch(in: line as String, range: NSRange(location: 0, length: line.length))
+        else { return false }
+
+        if match.range.length == line.length {
+            textView.insertText("", replacementRange: NSRange(location: lineStart, length: line.length))
+            return true
+        }
+        func group(_ i: Int) -> String {
+            let range = match.range(at: i)
+            return range.location == NSNotFound ? "" : line.substring(with: range)
+        }
+        let marker = group(2).isEmpty ? "\((Int(group(3)) ?? 0) + 1)\(group(4))" : group(2)
+        let box = group(6).isEmpty ? "" : "[ ] "
+        textView.insertText("\n\(group(1))\(marker)\(group(5))\(box)", replacementRange: caret)
+        return true
+    }
+
+    @objc private func sourceScrolled(_ notification: Notification) {
+        if isEditing { syncScroll() }
+    }
+
+    /// Scrolls the page to the same proportion of its height as the source view.
+    private func syncScroll() {
+        guard let documentView = sourceScroll.documentView else { return }
+        let visible = sourceScroll.contentView.bounds
+        let range = documentView.frame.height - visible.height
+        let fraction = range > 0 ? min(max(visible.minY / range, 0), 1) : 0
+        webView.evaluateJavaScript("window.scrollTo(0, \(fraction) * (document.documentElement.scrollHeight - innerHeight))")
+    }
+
     // MARK: Actions
 
     @objc func openInEditor(_ sender: Any?) {
-        guard let url = fileURL else { return }
+        guard let doc = markdown, let url = doc.fileURL else { return }
+        doc.saveNow()
         NSWorkspace.shared.open([url], withApplicationAt: Prefs.editor, configuration: NSWorkspace.OpenConfiguration())
     }
 
     @objc func showInFinder(_ sender: Any?) {
-        guard let url = fileURL else { return }
+        guard let url = markdown?.fileURL else { return }
         NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
-    @objc func reload(_ sender: Any?) { render() }
-
-    @objc func showFind(_ sender: Any?) {
-        searchItem.beginSearchInteraction()
+    @objc func reload(_ sender: Any?) {
+        fileChangedOnDisk()
+        render()
     }
 
-    @objc func findNext(_ sender: Any?) { find(backwards: false) }
-    @objc func findPrevious(_ sender: Any?) { find(backwards: true) }
+    /// While typing in the source, Find searches the source; otherwise the page.
+    private var findsInSource: Bool { isEditing && window?.firstResponder === sourceView }
+
+    @objc func showFind(_ sender: Any?) {
+        if findsInSource { sourceView.performTextFinderAction(sender) } else { searchItem.beginSearchInteraction() }
+    }
+
+    @objc func findNext(_ sender: Any?) {
+        if findsInSource { sourceView.performTextFinderAction(sender) } else { find(backwards: false) }
+    }
+
+    @objc func findPrevious(_ sender: Any?) {
+        if findsInSource { sourceView.performTextFinderAction(sender) } else { find(backwards: true) }
+    }
 
     private func find(backwards: Bool) {
         let query = searchItem.searchField.stringValue
@@ -314,10 +550,27 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
         Prefs.zoom = webView.pageZoom
     }
 
+    func validateMenuItem(_ item: NSMenuItem) -> Bool {
+        switch item.action {
+        case #selector(toggleEditing(_:)):
+            item.title = isEditing ? "Stop Editing" : "Edit Markdown"
+        case #selector(openInEditor(_:)):
+            item.title = "Open in \(FileManager.default.displayName(atPath: Prefs.editor.path))"
+            return markdown?.fileURL != nil
+        case #selector(showInFinder(_:)):
+            return markdown?.fileURL != nil
+        default:
+            break
+        }
+        return true
+    }
+
     // MARK: NSWindowDelegate
 
+    func windowWillReturnUndoManager(_ window: NSWindow) -> UndoManager? { markdown?.undoManager }
+
     func windowDidEndLiveResize(_ notification: Notification) {
-        if let size = window?.frame.size { Prefs.windowSize = size }
+        if !isEditing, let size = window?.frame.size { Prefs.windowSize = size }
     }
 
     // MARK: WKNavigationDelegate / WKUIDelegate
@@ -355,7 +608,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
     // MARK: NSToolbarDelegate
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .editor, .search]
+        [.flexibleSpace, .edit, .search]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
@@ -367,14 +620,13 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
         switch identifier {
         case .search:
             return searchItem
-        case .editor:
+        case .edit:
             let item = NSToolbarItem(itemIdentifier: identifier)
-            item.label = "Open in Editor"
-            item.toolTip = "Open in \(FileManager.default.displayName(atPath: Prefs.editor.path)) (⌘E)"
-            item.image = NSImage(systemSymbolName: "square.and.pencil", accessibilityDescription: "Open in Editor")
             item.isBordered = true
             item.target = self
-            item.action = #selector(openInEditor(_:))
+            item.action = #selector(toggleEditing(_:))
+            editItem = item
+            updateEditItem()
             return item
         default:
             return nil
@@ -384,7 +636,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
 
 extension NSToolbarItem.Identifier {
     static let search = Self("search")
-    static let editor = Self("editor")
+    static let edit = Self("edit")
 }
 
 // MARK: - App
@@ -392,6 +644,7 @@ extension NSToolbarItem.Identifier {
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
     func applicationWillFinishLaunching(_ notification: Notification) {
         _ = NSDocumentController.shared
+        PagePool.prepare()
         Prefs.applyAppearance()
         NSApp.mainMenu = makeMenu()
     }
@@ -412,6 +665,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         return false
     }
 
+    /// Switching to another app saves, so whatever reads the file next sees the edits.
+    func applicationDidResignActive(_ notification: Notification) {
+        for case let doc as MarkdownDocument in NSDocumentController.shared.documents { doc.saveNow() }
+    }
+
     @objc func setAppearance(_ sender: NSMenuItem) {
         Prefs.appearance = sender.representedObject as? String ?? "system"
         Prefs.applyAppearance()
@@ -419,7 +677,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
 
     @objc func chooseEditor(_ sender: Any?) {
         let panel = NSOpenPanel()
-        panel.message = "Choose the app ⌘E opens files in"
+        panel.message = "Choose the app “Open in…” (⇧⌘E) uses"
         panel.prompt = "Choose"
         panel.directoryURL = URL(fileURLWithPath: "/Applications")
         panel.allowedContentTypes = [.application]
@@ -432,7 +690,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item.state = (item.representedObject as? String) == Prefs.appearance ? .on : .off
         }
         if item.action == #selector(chooseEditor(_:)) {
-            item.title = "Editor: \(FileManager.default.displayName(atPath: Prefs.editor.path))…"
+            item.title = "External Editor: \(FileManager.default.displayName(atPath: Prefs.editor.path))…"
         }
         return true
     }
@@ -449,17 +707,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return menu
         }
         func item(_ title: String, _ action: Selector?, _ key: String = "",
-                  _ modifiers: NSEvent.ModifierFlags = .command, target: AnyObject? = nil) -> NSMenuItem {
+                  _ modifiers: NSEvent.ModifierFlags = .command, target: AnyObject? = nil,
+                  tag: Int = 0) -> NSMenuItem {
             let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
             item.keyEquivalentModifierMask = modifiers
             item.target = target
+            item.tag = tag
             return item
         }
 
         _ = submenu("Reader", [
             item("About Reader", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
-            item("Editor…", #selector(chooseEditor(_:)), target: self),
+            item("External Editor…", #selector(chooseEditor(_:)), target: self),
             .separator(),
             item("Hide Reader", #selector(NSApplication.hide(_:)), "h"),
             item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
@@ -473,23 +733,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let recentItem = NSMenuItem(title: "Open Recent", action: nil, keyEquivalent: "")
         recentItem.submenu = recent
         _ = submenu("File", [
+            item("New", #selector(NSDocumentController.newDocument(_:)), "n"),
             item("Open…", #selector(NSDocumentController.openDocument(_:)), "o"),
             recentItem,
             .separator(),
-            item("Open in Editor", #selector(ReaderWindowController.openInEditor(_:)), "e"),
+            item("Close", #selector(NSWindow.performClose(_:)), "w"),
+            item("Save", #selector(NSDocument.save(_:)), "s"),
+            item("Duplicate", #selector(NSDocument.duplicate(_:)), "s", [.command, .shift]),
+            item("Rename…", #selector(NSDocument.rename(_:))),
+            item("Move To…", #selector(NSDocument.move(_:))),
+            item("Revert to Saved", #selector(NSDocument.revertToSaved(_:))),
+            .separator(),
+            item("Open in Editor", #selector(ReaderWindowController.openInEditor(_:)), "e", [.command, .shift]),
             item("Show in Finder", #selector(ReaderWindowController.showInFinder(_:)), "r", [.command, .shift]),
             .separator(),
-            item("Close", #selector(NSWindow.performClose(_:)), "w"),
             item("Print…", #selector(NSDocument.printDocument(_:)), "p"),
         ])
 
         _ = submenu("Edit", [
+            item("Undo", Selector(("undo:")), "z"),
+            item("Redo", Selector(("redo:")), "z", [.command, .shift]),
+            .separator(),
+            item("Cut", #selector(NSText.cut(_:)), "x"),
             item("Copy", #selector(NSText.copy(_:)), "c"),
+            item("Paste", #selector(NSText.paste(_:)), "v"),
             item("Select All", #selector(NSText.selectAll(_:)), "a"),
             .separator(),
-            item("Find…", #selector(ReaderWindowController.showFind(_:)), "f"),
-            item("Find Next", #selector(ReaderWindowController.findNext(_:)), "g"),
-            item("Find Previous", #selector(ReaderWindowController.findPrevious(_:)), "g", [.command, .shift]),
+            item("Find…", #selector(ReaderWindowController.showFind(_:)), "f",
+                 tag: NSTextFinder.Action.showFindInterface.rawValue),
+            item("Find Next", #selector(ReaderWindowController.findNext(_:)), "g",
+                 tag: NSTextFinder.Action.nextMatch.rawValue),
+            item("Find Previous", #selector(ReaderWindowController.findPrevious(_:)), "g", [.command, .shift],
+                 tag: NSTextFinder.Action.previousMatch.rawValue),
+            .separator(),
+            item("Check Spelling While Typing", #selector(NSTextView.toggleContinuousSpellChecking(_:))),
         ])
 
         let appearance = NSMenu(title: "Appearance")
@@ -501,6 +778,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         appearanceItem.submenu = appearance
         _ = submenu("View", [
+            item("Edit Markdown", #selector(ReaderWindowController.toggleEditing(_:)), "e"),
+            .separator(),
             item("Actual Size", #selector(ReaderWindowController.actualSize(_:)), "0"),
             item("Zoom In", #selector(ReaderWindowController.zoomIn(_:)), "="),
             item("Zoom Out", #selector(ReaderWindowController.zoomOut(_:)), "-"),
