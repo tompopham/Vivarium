@@ -1,0 +1,83 @@
+/* Colours follow macOS light/dark live: WebKit updates prefers-color-scheme the moment the
+   app's appearance changes. The backgrounds match NSColor.textBackgroundColor so the window
+   and page never show a seam. */
+:root {
+  color-scheme: light dark;
+  --bg: #ffffff;
+  --text: #1f2328;
+  --muted: #656d76;
+  --rule: #d1d9e0;
+  --subtle: #f6f8fa;
+  --link: #0969da;
+  --mark: #fff8c5;
+  --quote: #d1d9e0;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #1e1e1e;
+    --text: #e6edf3;
+    --muted: #9198a1;
+    --rule: #3d444d;
+    --subtle: #2a2a2a;
+    --link: #4493f8;
+    --mark: #5c4d12;
+    --quote: #4a515b;
+  }
+}
+
+html { background: var(--bg); }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 16px/1.6 -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overflow-wrap: break-word;
+}
+main { max-width: 46em; margin: 0 auto; padding: 28px 36px 80px; }
+main > :first-child { margin-top: 0; }
+
+h1, h2, h3, h4, h5, h6 { line-height: 1.25; margin: 1.6em 0 0.6em; font-weight: 600; }
+h1 { font-size: 2em; padding-bottom: 0.25em; border-bottom: 1px solid var(--rule); }
+h2 { font-size: 1.5em; padding-bottom: 0.25em; border-bottom: 1px solid var(--rule); }
+h3 { font-size: 1.25em; }
+h4 { font-size: 1em; }
+h5, h6 { font-size: 0.875em; color: var(--muted); }
+
+p, ul, ol, blockquote, pre, table, details, .math-block { margin: 0 0 1em; }
+ul, ol { padding-left: 2em; }
+li + li, li > ul, li > ol { margin-top: 0.25em; }
+li > ul, li > ol { margin-bottom: 0; }
+li:has(> input[type="checkbox"]) { list-style: none; }
+li > input[type="checkbox"] { margin: 0 0.4em 0 -1.4em; vertical-align: middle; }
+
+a { color: var(--link); text-decoration: none; }
+a:hover { text-decoration: underline; }
+a.wikilink { text-decoration: underline dotted; text-underline-offset: 3px; }
+hr { height: 0; border: 0; border-top: 2px solid var(--rule); margin: 2em 0; }
+mark { background: var(--mark); color: inherit; padding: 0 2px; }
+img { max-width: 100%; }
+
+blockquote { padding: 0 1em; color: var(--muted); border-left: 4px solid var(--quote); }
+
+code, pre, kbd { font: 0.875em/1.45 ui-monospace, "SF Mono", Menlo, monospace; }
+:not(pre) > code { background: var(--subtle); padding: 0.15em 0.35em; border-radius: 5px; }
+pre { background: var(--subtle); padding: 14px 16px; border-radius: 8px; overflow-x: auto; }
+pre code, pre code.hljs { background: none; padding: 0; font-size: 1em; }
+kbd { border: 1px solid var(--rule); border-bottom-width: 2px; border-radius: 4px; padding: 0 0.35em; }
+
+table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: auto; }
+th, td { border: 1px solid var(--rule); padding: 6px 13px; }
+th { font-weight: 600; background: var(--subtle); }
+
+.frontmatter { color: var(--muted); font-size: 0.8em; border-left: 3px solid var(--rule); border-radius: 0 8px 8px 0; }
+.math-block { overflow-x: auto; overflow-y: hidden; }
+.math-block .katex-display { margin: 0; }
+.math-error { color: #cf222e; }
+
+@media print {
+  :root { --bg: #fff; --text: #000; --muted: #555; --rule: #ccc; --subtle: #f4f4f4; --link: #0645ad; --mark: #fff3a3; --quote: #ccc; }
+  main { max-width: none; padding: 0; }
+  pre, table, .math-block, img { break-inside: avoid; }
+  h1, h2, h3, h4 { break-after: avoid; }
+}

@@ -1,0 +1,22 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<!-- Markdown can carry raw HTML. This policy stops any script in a document from running
+     (only the bundled files load) and stops the page making network requests, except for
+     remote images. -->
+<meta http-equiv="Content-Security-Policy"
+      content="default-src 'none'; script-src file:; style-src file: 'unsafe-inline'; font-src file: data:; img-src file: data: https: http:; media-src file: https:">
+<base href="./">
+<link rel="stylesheet" href="vendor/katex.css">
+<link rel="stylesheet" href="vendor/highlight.css">
+<link rel="stylesheet" href="reader.css">
+</head>
+<body>
+<main id="content"></main>
+<script src="vendor/marked.js"></script>
+<script src="vendor/katex.js"></script>
+<script src="vendor/highlight.js"></script>
+<script src="reader.js"></script>
+</body>
+</html>
