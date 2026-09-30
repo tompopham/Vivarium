@@ -1,4 +1,4 @@
-// Reader — a Markdown reader and editor that follows the system light/dark setting live.
+// Vivarium — a Markdown reader and editor that follows the system light/dark setting live.
 //
 // Each document opens in a window holding a WKWebView. The page (web/reader.html) renders
 // with marked, KaTeX and highlight.js, all bundled so nothing is fetched. Its colours come from
@@ -6,6 +6,9 @@
 // the thing Typora does not do. The file is watched and re-rendered in place on every save,
 // so the scroll position survives edits made in another app. ⌘E opens the Markdown source
 // beside the page for editing; the page follows as you type and the file saves itself.
+//
+// Named after the Vivarium, the monastery Cassiodorus founded for monks to read and copy
+// manuscripts.
 
 import AppKit
 import UniformTypeIdentifiers
@@ -183,11 +186,11 @@ final class MarkdownDocument: NSDocument {
     override func data(ofType typeName: String) throws -> Data { Data(text.utf8) }
 
     override func makeWindowControllers() {
-        addWindowController(ReaderWindowController())
+        addWindowController(DocumentWindowController())
     }
 
     override func printOperation(withSettings printSettings: [NSPrintInfo.AttributeKey: Any]) throws -> NSPrintOperation {
-        guard let controller = windowControllers.first as? ReaderWindowController else {
+        guard let controller = windowControllers.first as? DocumentWindowController else {
             throw CocoaError(.featureUnsupported)
         }
         return controller.printOperation(printInfo: printInfo)
@@ -196,7 +199,7 @@ final class MarkdownDocument: NSDocument {
     func saveNow() {
         guard isDocumentEdited else { return }
         autosave(withImplicitCancellability: false) { error in
-            if let error { NSLog("Reader: save failed: \(error)") }
+            if let error { NSLog("Vivarium: save failed: \(error)") }
         }
     }
 }
@@ -207,21 +210,21 @@ final class MarkdownDocument: NSDocument {
 /// So a page is loaded ahead of time — at launch, and again after each window takes one —
 /// and a new window starts with a page that is already loaded.
 enum PagePool {
-    private static var spare: ReaderWebView?
+    private static var spare: PageWebView?
 
     static func prepare() {
         if spare == nil { spare = make() }
     }
 
-    static func take() -> ReaderWebView {
+    static func take() -> PageWebView {
         let view = spare ?? make()
         spare = nil
         DispatchQueue.main.asyncAfter(deadline: .now() + 1) { prepare() }
         return view
     }
 
-    private static func make() -> ReaderWebView {
-        let view = ReaderWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 800),
+    private static func make() -> PageWebView {
+        let view = PageWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 800),
                                  configuration: WKWebViewConfiguration())
         view.setValue(false, forKey: "drawsBackground")  // no white flash in dark mode
         let page = Bundle.main.url(forResource: "reader", withExtension: "html", subdirectory: "web")!
@@ -234,15 +237,15 @@ enum PagePool {
 
 /// Lets a click on a link in a window that is not in front follow the link straight away,
 /// instead of only bringing the window forward.
-final class ReaderWebView: WKWebView {
+final class PageWebView: WKWebView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 }
 
 /// Reading shows the rendered page alone. Editing (⌘E) opens the Markdown source to its
 /// left; the page re-renders as you type and follows the source's scroll position.
-final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSMenuItemValidation,
+final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSToolbarDelegate, NSMenuItemValidation,
                                     WKNavigationDelegate, WKUIDelegate, NSTextViewDelegate {
-    private let webView: ReaderWebView
+    private let webView: PageWebView
     private let splitView = NSSplitView()
     private let sourceScroll = NSTextView.scrollableTextView()
     private var sourceView: NSTextView { sourceScroll.documentView as! NSTextView }
@@ -301,7 +304,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
         splitView.adjustSubviews()
         window.delegate = self
 
-        let toolbar = NSToolbar(identifier: "Reader")
+        let toolbar = NSToolbar(identifier: "Vivarium")
         toolbar.delegate = self
         toolbar.displayMode = .iconOnly
         window.toolbar = toolbar
@@ -363,7 +366,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
         do {
             try doc.revert(toContentsOf: url, ofType: doc.fileType ?? "net.daringfireball.markdown")
         } catch {
-            NSLog("Reader: reload failed: \(error)")
+            NSLog("Vivarium: reload failed: \(error)")
         }
     }
 
@@ -373,7 +376,7 @@ final class ReaderWindowController: NSWindowController, NSWindowDelegate, NSTool
         webView.callAsyncJavaScript("render(markdown, base)",
                                     arguments: ["markdown": doc.text, "base": folder.absoluteString],
                                     in: nil, in: .page) { [weak self] result in
-            if case .failure(let error) = result { NSLog("Reader: render failed: \(error)") }
+            if case .failure(let error) = result { NSLog("Vivarium: render failed: \(error)") }
             self?.hasRendered = true
             self?.showIfWaiting()
             if self?.isEditing == true { self?.syncScroll() }
@@ -716,16 +719,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             return item
         }
 
-        _ = submenu("Reader", [
-            item("About Reader", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
+        _ = submenu("Vivarium", [
+            item("About Vivarium", #selector(NSApplication.orderFrontStandardAboutPanel(_:))),
             .separator(),
             item("External Editor…", #selector(chooseEditor(_:)), target: self),
             .separator(),
-            item("Hide Reader", #selector(NSApplication.hide(_:)), "h"),
+            item("Hide Vivarium", #selector(NSApplication.hide(_:)), "h"),
             item("Hide Others", #selector(NSApplication.hideOtherApplications(_:)), "h", [.command, .option]),
             item("Show All", #selector(NSApplication.unhideAllApplications(_:))),
             .separator(),
-            item("Quit Reader", #selector(NSApplication.terminate(_:)), "q"),
+            item("Quit Vivarium", #selector(NSApplication.terminate(_:)), "q"),
         ])
 
         let recent = NSMenu(title: "Open Recent")
@@ -744,8 +747,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item("Move To…", #selector(NSDocument.move(_:))),
             item("Revert to Saved", #selector(NSDocument.revertToSaved(_:))),
             .separator(),
-            item("Open in Editor", #selector(ReaderWindowController.openInEditor(_:)), "e", [.command, .shift]),
-            item("Show in Finder", #selector(ReaderWindowController.showInFinder(_:)), "r", [.command, .shift]),
+            item("Open in Editor", #selector(DocumentWindowController.openInEditor(_:)), "e", [.command, .shift]),
+            item("Show in Finder", #selector(DocumentWindowController.showInFinder(_:)), "r", [.command, .shift]),
             .separator(),
             item("Print…", #selector(NSDocument.printDocument(_:)), "p"),
         ])
@@ -759,11 +762,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
             item("Paste", #selector(NSText.paste(_:)), "v"),
             item("Select All", #selector(NSText.selectAll(_:)), "a"),
             .separator(),
-            item("Find…", #selector(ReaderWindowController.showFind(_:)), "f",
+            item("Find…", #selector(DocumentWindowController.showFind(_:)), "f",
                  tag: NSTextFinder.Action.showFindInterface.rawValue),
-            item("Find Next", #selector(ReaderWindowController.findNext(_:)), "g",
+            item("Find Next", #selector(DocumentWindowController.findNext(_:)), "g",
                  tag: NSTextFinder.Action.nextMatch.rawValue),
-            item("Find Previous", #selector(ReaderWindowController.findPrevious(_:)), "g", [.command, .shift],
+            item("Find Previous", #selector(DocumentWindowController.findPrevious(_:)), "g", [.command, .shift],
                  tag: NSTextFinder.Action.previousMatch.rawValue),
             .separator(),
             item("Check Spelling While Typing", #selector(NSTextView.toggleContinuousSpellChecking(_:))),
@@ -778,15 +781,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuItemValidation {
         let appearanceItem = NSMenuItem(title: "Appearance", action: nil, keyEquivalent: "")
         appearanceItem.submenu = appearance
         _ = submenu("View", [
-            item("Edit Markdown", #selector(ReaderWindowController.toggleEditing(_:)), "e"),
+            item("Edit Markdown", #selector(DocumentWindowController.toggleEditing(_:)), "e"),
             .separator(),
-            item("Actual Size", #selector(ReaderWindowController.actualSize(_:)), "0"),
-            item("Zoom In", #selector(ReaderWindowController.zoomIn(_:)), "="),
-            item("Zoom Out", #selector(ReaderWindowController.zoomOut(_:)), "-"),
+            item("Actual Size", #selector(DocumentWindowController.actualSize(_:)), "0"),
+            item("Zoom In", #selector(DocumentWindowController.zoomIn(_:)), "="),
+            item("Zoom Out", #selector(DocumentWindowController.zoomOut(_:)), "-"),
             .separator(),
             appearanceItem,
             .separator(),
-            item("Reload", #selector(ReaderWindowController.reload(_:)), "r"),
+            item("Reload", #selector(DocumentWindowController.reload(_:)), "r"),
             item("Enter Full Screen", #selector(NSWindow.toggleFullScreen(_:)), "f", [.command, .control]),
         ])
 

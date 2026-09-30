@@ -1,8 +1,9 @@
-# Reader
+# Vivarium
 
 A Markdown reader and editor for macOS. Personal replacement for Typora, which doesn't follow
-the system light/dark switch live. Reader does: colours come from CSS
-`prefers-color-scheme`, which WebKit re-evaluates the moment macOS changes appearance.
+the system light/dark switch live. Vivarium does: colours come from CSS `prefers-color-scheme`,
+which WebKit re-evaluates the moment macOS changes appearance. Named after the Vivarium, the
+monastery Cassiodorus founded for monks to read and copy manuscripts.
 
 - Renders GitHub-flavoured Markdown (tables, task lists), LaTeX maths (`$…$`, `$$…$$`, `\(…\)`,
   `\[…\]`) with KaTeX, and fenced code with highlight.js. All bundled — nothing is fetched.
@@ -11,8 +12,8 @@ the system light/dark switch live. Reader does: colours come from CSS
   the source's scroll. Edits save themselves (a moment after typing stops, on leaving the app,
   on ⌘E and on close), with Versions history under File › Revert to Saved. Return continues
   lists, numbered and task lists included; Return on an empty item ends the list.
-- If another app changes the file while it has no unsaved edits here, Reader reloads it.
-- ⇧⌘E opens the file in an external editor (Reader › External Editor… to choose).
+- If another app changes the file while it has no unsaved edits here, Vivarium reloads it.
+- ⇧⌘E opens the file in an external editor (Vivarium › External Editor… to choose).
 - Obsidian `[[wikilinks]]` resolve anywhere in the vault; other links open in their own apps.
 - YAML front matter is shown as a dim block. Scripts in documents never run (CSP).
 
@@ -20,8 +21,8 @@ Keys: ⌘N new, ⌘O open, ⌘E edit, ⇧⌘E external editor, ⌘F / ⌘G find,
 View › Appearance overrides the system setting.
 
 ## Build & install
-    ./build.sh            # builds build/Reader.app
-    ./build.sh --install  # builds, replaces /Applications/Reader.app, opens it
+    ./build.sh            # builds build/Vivarium.app
+    ./build.sh --install  # builds, replaces /Applications/Vivarium.app, opens it
 
 Requires the Xcode command line tools. Apple-silicon only as written.
 

@@ -3,11 +3,11 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleExecutable</key>
-	<string>Reader</string>
+	<string>Vivarium</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.tompopham.Reader</string>
+	<string>com.tompopham.Vivarium</string>
 	<key>CFBundleName</key>
-	<string>Reader</string>
+	<string>Vivarium</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
