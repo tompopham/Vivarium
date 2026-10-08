@@ -277,18 +277,23 @@ enum PagePool {
         let view = PageWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 800),
                                  configuration: WKWebViewConfiguration())
         view.setValue(false, forKey: "drawsBackground")  // no white flash in dark mode
-        let page = Bundle.main.url(forResource: "reader", withExtension: "html", subdirectory: "web")!
-        view.loadFileURL(page, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+        view.loadPage()
         return view
     }
 }
 
 // MARK: - Window
 
-/// Lets a click on a link in a window that is not in front follow the link straight away,
-/// instead of only bringing the window forward.
 final class PageWebView: WKWebView {
+    /// Lets a click on a link in a window that is not in front follow the link straight away,
+    /// instead of only bringing the window forward.
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    /// Loads the bundled page, empty until the app renders a document into it.
+    func loadPage() {
+        let page = Bundle.main.url(forResource: "reader", withExtension: "html", subdirectory: "web")!
+        loadFileURL(page, allowingReadAccessTo: URL(fileURLWithPath: "/"))
+    }
 }
 
 /// Reading shows the rendered page alone. Editing (⌘E) opens the Markdown source to its
@@ -309,6 +314,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     private(set) var isEditing = false
     private var waitingToShow = false
     private var hasRendered = false
+    private var lastCrash = Date.distantPast
 
     init() {
         webView = PagePool.take()
@@ -563,6 +569,7 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
     }
 
     @objc func reload(_ sender: Any?) {
+        if !pageLoaded && !webView.isLoading { webView.loadPage() }  // the page process died
         fileChangedOnDisk()
         render()
     }
@@ -653,9 +660,18 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         return nil
     }
 
+    /// WebKit's page process can die (a crash, or macOS reclaiming memory), leaving the view
+    /// blank. Load the page afresh rather than reload(), which the policy above would cancel;
+    /// didFinish then renders the document again. If it dies again within seconds the document
+    /// itself is probably the cause, so stop there rather than loop; ⌘R tries again.
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         pageLoaded = false
-        webView.reload()
+        defer { lastCrash = Date() }
+        guard Date().timeIntervalSince(lastCrash) > 10 else {
+            NSLog("Vivarium: the page process died again; not reloading until ⌘R")
+            return
+        }
+        self.webView.loadPage()
     }
 
     // MARK: NSToolbarDelegate
