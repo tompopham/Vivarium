@@ -70,7 +70,8 @@ table { border-collapse: collapse; display: block; max-width: 100%; overflow-x: 
 th, td { border: 1px solid var(--rule); padding: 6px 13px; }
 th { font-weight: 600; background: var(--subtle); }
 
-.frontmatter { color: var(--muted); font-size: 0.8em; border-left: 3px solid var(--rule); border-radius: 0 8px 8px 0; }
+.frontmatter { color: var(--muted); font-size: 0.8em; border-left: 3px solid var(--rule); border-radius: 0 8px 8px 0;
+  white-space: pre-wrap; overflow-x: visible; }
 .math-block { overflow-x: auto; overflow-y: hidden; }
 .math-block .katex-display { margin: 0; }
 .math-error { color: #cf222e; }
