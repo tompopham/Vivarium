@@ -156,8 +156,7 @@ enum Links {
     /// is a known kind of document, since files copied from USB sticks and network drives
     /// are often marked executable.
     static func canRunCode(_ url: URL) -> Bool {
-        // An alias or symlink opens whatever it points at, so look at that.
-        let url = (try? URL(resolvingAliasFileAt: url)) ?? url
+        let url = resolved(url)
         guard let values = try? url.resourceValues(forKeys: [.contentTypeKey, .isApplicationKey,
                                                               .isExecutableKey, .isDirectoryKey])
         else { return true }
@@ -167,13 +166,22 @@ enum Links {
         return !(values.contentType.map { $0.conforms(to: .content) || $0.conforms(to: .archive) } ?? false)
     }
 
+    /// An alias or symlink opens whatever it points at (through any chain of them), so that
+    /// is the file to judge and to name.
+    private static func resolved(_ url: URL) -> URL { (try? URL(resolvingAliasFileAt: url)) ?? url }
+
     /// A link is easy to click without looking where it goes, so an app or script is only
-    /// opened once asked. Return shows it in Finder; Open must be chosen deliberately.
+    /// opened once asked. Return shows it in Finder; Open must be chosen deliberately. A link
+    /// can be an alias with a harmless name (notes.pdf) for a script, so the sheet names the
+    /// file it points to whenever that is called something else.
     private static func confirmOpening(_ url: URL, from window: NSWindow?) {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.messageText = "Open \(url.lastPathComponent)?"
-        alert.informativeText = "It can run commands on this Mac."
+        let target = resolved(url).lastPathComponent
+        alert.informativeText = target == url.lastPathComponent
+            ? "It can run commands on this Mac."
+            : "It points to \(target), which can run commands on this Mac."
         alert.addButton(withTitle: "Show in Finder")
         alert.addButton(withTitle: "Open").hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
