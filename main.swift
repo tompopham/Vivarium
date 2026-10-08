@@ -145,10 +145,11 @@ enum Links {
     }
 
     /// Kinds of file that run something when opened: apps and other programs, scripts
-    /// (Python's and Ruby's count as shell scripts), Terminal's .command, .tool and .terminal
-    /// files, and .fileloc files, which open whatever they point at.
+    /// (Python's and Ruby's count as shell scripts), Terminal's .command, .tool, .terminal and
+    /// .term files, and .fileloc files, which open whatever they point at.
     private static let runnableTypes: [UTType] = [.application, .executable, .shellScript]
-        + ["com.apple.terminal.shell-script", "com.apple.terminal.settings", "com.apple.file-internet-location"]
+        + ["com.apple.terminal.shell-script", "com.apple.terminal.settings", "com.apple.terminal.session",
+           "com.apple.file-internet-location"]
             .compactMap { UTType($0) }
 
     /// Whether opening the file could run code. A file marked executable counts too unless it
