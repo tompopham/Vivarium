@@ -268,8 +268,14 @@ final class MarkdownDocument: NSDocument {
 /// Starting WebKit's helper processes takes about a second, far longer than rendering does.
 /// So a page is loaded ahead of time — at launch, and again after each window takes one —
 /// and a new window starts with a page that is already loaded.
+///
+/// The spare is watched until a window takes it (the window then watches it itself), since its
+/// page process can die while it waits: a crash, or macOS reclaiming memory from a page nobody
+/// is looking at. A window given that page would open blank.
 enum PagePool {
     private static var spare: PageWebView?
+    private static let watcher = Watcher()
+    private static var lastDeath = Date.distantPast
 
     static func prepare() {
         if spare == nil { spare = make() }
@@ -286,8 +292,27 @@ enum PagePool {
         let view = PageWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 800),
                                  configuration: WKWebViewConfiguration())
         view.setValue(false, forKey: "drawsBackground")  // no white flash in dark mode
+        view.navigationDelegate = watcher
         view.loadPage()
         return view
+    }
+
+    /// Swaps a fresh page in for a dead spare. If the last spare also died within seconds,
+    /// leave the pool empty rather than loop; the next window then loads its own page, a
+    /// second slower, and the pool fills again after it.
+    private static func spareDied(_ view: WKWebView) {
+        guard view === spare else { return }
+        spare = nil
+        defer { lastDeath = Date() }
+        guard Date().timeIntervalSince(lastDeath) > 10 else {
+            NSLog("Vivarium: the spare page's process died again; leaving the pool empty")
+            return
+        }
+        prepare()
+    }
+
+    private final class Watcher: NSObject, WKNavigationDelegate {
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { PagePool.spareDied(webView) }
     }
 }
 
