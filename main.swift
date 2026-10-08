@@ -118,7 +118,9 @@ enum Links {
 
     static func isMarkdown(_ url: URL) -> Bool { markdownExtensions.contains(url.pathExtension.lowercased()) }
 
-    static func open(_ url: URL) {
+    /// Opens a link's target. `window` is the window the link was clicked in, for the sheet
+    /// that asks before opening an app or script.
+    static func open(_ url: URL, from window: NSWindow? = nil) {
         guard url.isFileURL else {
             NSWorkspace.shared.open(url)
             return
@@ -135,8 +137,56 @@ enum Links {
         }
         if isMarkdown(target) {
             NSDocumentController.shared.openDocument(withContentsOf: target, display: true) { _, _, _ in }
+        } else if canRunCode(target) {
+            confirmOpening(target, from: window)
         } else {
             NSWorkspace.shared.open(target)
+        }
+    }
+
+    /// Kinds of file that run something when opened: apps and other programs, scripts
+    /// (Python's and Ruby's count as shell scripts), Terminal's .command, .tool and .terminal
+    /// files, and .fileloc files, which open whatever they point at.
+    private static let runnableTypes: [UTType] = [.application, .executable, .shellScript]
+        + ["com.apple.terminal.shell-script", "com.apple.terminal.settings", "com.apple.file-internet-location"]
+            .compactMap { UTType($0) }
+
+    /// Whether opening the file could run code. A file marked executable counts too unless it
+    /// is a known kind of document, since files copied from USB sticks and network drives
+    /// are often marked executable.
+    static func canRunCode(_ url: URL) -> Bool {
+        // An alias or symlink opens whatever it points at, so look at that.
+        let url = (try? URL(resolvingAliasFileAt: url)) ?? url
+        guard let values = try? url.resourceValues(forKeys: [.contentTypeKey, .isApplicationKey,
+                                                              .isExecutableKey, .isDirectoryKey])
+        else { return true }
+        if values.isApplication == true { return true }
+        if let type = values.contentType, runnableTypes.contains(where: type.conforms(to:)) { return true }
+        guard values.isExecutable == true, values.isDirectory != true else { return false }
+        return !(values.contentType.map { $0.conforms(to: .content) || $0.conforms(to: .archive) } ?? false)
+    }
+
+    /// A link is easy to click without looking where it goes, so an app or script is only
+    /// opened once asked. Return shows it in Finder; Open must be chosen deliberately.
+    private static func confirmOpening(_ url: URL, from window: NSWindow?) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "Open \(url.lastPathComponent)?"
+        alert.informativeText = "It can run commands on this Mac."
+        alert.addButton(withTitle: "Show in Finder")
+        alert.addButton(withTitle: "Open").hasDestructiveAction = true
+        alert.addButton(withTitle: "Cancel")
+        let respond = { (response: NSApplication.ModalResponse) in
+            switch response {
+            case .alertFirstButtonReturn: NSWorkspace.shared.activateFileViewerSelecting([url])
+            case .alertSecondButtonReturn: NSWorkspace.shared.open(url)
+            default: break
+            }
+        }
+        if let window {
+            alert.beginSheetModal(for: window, completionHandler: respond)
+        } else {
+            respond(alert.runModal())
         }
     }
 
@@ -593,13 +643,13 @@ final class DocumentWindowController: NSWindowController, NSWindowDelegate, NSTo
         }
         decisionHandler(.cancel)
         if navigationAction.navigationType == .linkActivated, let url = navigationAction.request.url {
-            Links.open(url)
+            Links.open(url, from: window)
         }
     }
 
     func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
                  for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
-        if let url = navigationAction.request.url { Links.open(url) }  // target="_blank"
+        if let url = navigationAction.request.url { Links.open(url, from: window) }  // target="_blank"
         return nil
     }
 
